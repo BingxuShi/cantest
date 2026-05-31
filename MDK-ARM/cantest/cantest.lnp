@@ -1,0 +1,28 @@
+--cpu Cortex-M3
+"cantest\startup_stm32f105xc.o"
+"cantest\main.o"
+"cantest\gpio.o"
+"cantest\can.o"
+"cantest\spi.o"
+"cantest\usart.o"
+"cantest\stm32f1xx_it.o"
+"cantest\stm32f1xx_hal_msp.o"
+"cantest\stm32f1xx_hal_gpio_ex.o"
+"cantest\stm32f1xx_hal_can.o"
+"cantest\stm32f1xx_hal.o"
+"cantest\stm32f1xx_hal_rcc.o"
+"cantest\stm32f1xx_hal_rcc_ex.o"
+"cantest\stm32f1xx_hal_gpio.o"
+"cantest\stm32f1xx_hal_dma.o"
+"cantest\stm32f1xx_hal_cortex.o"
+"cantest\stm32f1xx_hal_pwr.o"
+"cantest\stm32f1xx_hal_flash.o"
+"cantest\stm32f1xx_hal_flash_ex.o"
+"cantest\stm32f1xx_hal_exti.o"
+"cantest\stm32f1xx_hal_spi.o"
+"cantest\stm32f1xx_hal_uart.o"
+"cantest\system_stm32f1xx.o"
+--strict --scatter "cantest\cantest.sct"
+--summary_stderr --info summarysizes --map --load_addr_map_info --xref --callgraph --symbols
+--info sizes --info totals --info unused --info veneers
+--list "cantest.map" -o cantest\cantest.axf

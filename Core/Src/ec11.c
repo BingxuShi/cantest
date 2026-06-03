@@ -1,72 +1,80 @@
 #include "ec11.h"
 
-//????
-#define KEY_DELAY_MS 20U
-#define ENCODER_FILTER_CNT 2U
+unsigned int led_num = 0;
+bool CW ;
+bool CCW ;
+unsigned int num_test = 0;
 
-EC11_t ec11;
-static uint16_t key_tick = 0;
-static uint8_t last_a = 0; //?????A???
 
-void EC11_Scan(void)
-{
-  uint8_t now_a,now_b;
-  //??AB?
-  now_a = HAL_GPIO_ReadPin(EC11_A_PORT,EC11_A_PIN);
-  now_b = HAL_GPIO_ReadPin(EC11_B_PORT,EC11_B_PIN);
+void EC11_update(void) {
+    // static uint8_t lcd_long_press_active = 0;
+    // static uint8_t lcd_button_pressed = 0;
+    // if (READ(BTN_ENC) == 0)
+    // { //button is pressed
+    //     if (buttonBlanking.expired_cont(BUTTON_BLANKING_TIME)) {
+    //         buttonBlanking.start();
+    //         safetyTimer.start();
+    //         if ((lcd_button_pressed == 0) && (lcd_long_press_active == 0))
+    //         {
+    //             longPressTimer.start();
+    //             lcd_button_pressed = 1;
+    //         }
+    //         else if (longPressTimer.expired(LONG_PRESS_TIME))
+    //         {
+    //             lcd_long_press_active = 1;
+    //             lcd_longpress_trigger = 1;
+    //         }
+    //     }
+    // }
+    // else
+    // { //button not pressed
+    //     if (lcd_button_pressed)
+    //     { //button was released
+    //         lcd_button_pressed = 0; // Reset to prevent double triggering
+    //         if (!lcd_long_press_active)
+    //         { //button released before long press gets activated
+    //             lcd_click_trigger = 1; // This flag is reset when the event is consumed
+    //         }
+    //         lcd_backlight_wake_trigger = true; // flag event, knob pressed
+    //         lcd_long_press_active = 0;
+    //     }
+    // }
+    //manage encoder rotation
+    static const unsigned int encrot_table[] = {
+        0, -1, 1, 2,
+        1, 0, 2, -1,
+        -1, -2, 0, 1,
+        -2, 1, -1, 0,
+    };
+    static int EC11_encoder_diff = 0;
+    static unsigned int enc_bits_old = 0;
+    unsigned int enc_bits = 0;
 
-  //================???????================
-  if(last_a != now_a) //A?????
-  {
-    if(now_a == 0) //???????
-    {
-      if(now_b == 1)
-      {
-        ec11.cnt++;
-        ec11.dir = 1;
-      }
-      else
-      {
-        ec11.cnt--;
-        ec11.dir = -1;
-      }
+    if(!EC11_PH_A) 
+        enc_bits |= _BV(0);
+    if(!EC11_PH_B) 
+        enc_bits |= _BV(1);
+    
+    if(enc_bits != enc_bits_old) {
+        int8_t newDiff = encrot_table[(enc_bits_old << 2) | enc_bits];
+        EC11_encoder_diff += newDiff;
+        
+        if (abs(EC11_encoder_diff) >= ENCODER_PULSES_PER_STEP) {
+            if(EC11_encoder_diff < 0) {
+                CW = true;
+            }
+            if(EC11_encoder_diff > 0) {
+                CCW = true;
+            }
+            
+        }
+        if (abs(EC11_encoder_diff) >= ENCODER_PULSES_PER_STEP) {
+            EC11_encoder_diff = 0;
+        }
+        enc_bits_old = enc_bits;
     }
-  }
-  last_a = now_a;
 
-  //================???? ????================
-  if(HAL_GPIO_ReadPin(EC11_SW_PORT,EC11_SW_PIN) == GPIO_PIN_RESET) //???????
-  {
-    key_tick++;
-    if(key_tick >= KEY_DELAY_MS)
-    {
-      ec11.key_flag = 1;
-      key_tick = KEY_DELAY_MS; //????
-    }
-  }
-  else
-  {
-    key_tick = 0;
-  }
 }
 
-//??????,??????????
-uint8_t EC11_GetKey(void)
-{
-  uint8_t ret = ec11.key_flag;
-  ec11.key_flag = 0;
-  return ret;
-}
 
-//???????
-int16_t EC11_GetCnt(void)
-{
-  return ec11.cnt;
-}
 
-//?????
-void EC11_ClearCnt(void)
-{
-  ec11.cnt = 0;
-  ec11.dir = 0;
-}

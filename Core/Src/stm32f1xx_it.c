@@ -26,22 +26,7 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN TD */
-extern TIM_HandleTypeDef htim2;
-extern void EC11_Scan(void);
 
-void TIM2_IRQHandler(void)
-{
-  HAL_TIM_IRQHandler(&htim2);
-}
-
-//????????? 1ms???
-void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
-{
-  if(htim->Instance == TIM2)
-  {
-    EC11_Scan(); //??1ms????EC11
-  }
-}
 /* USER CODE END TD */
 
 /* Private define ------------------------------------------------------------*/

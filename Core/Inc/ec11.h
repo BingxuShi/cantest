@@ -1,29 +1,20 @@
-#ifndef __EC11_H
-#define __EC11_H
+#ifndef EC11_H
+#define EC11_H
 
-#include "stm32f1xx_hal.h"
 
-//????
-#define EC11_SW_PIN    GPIO_PIN_0
-#define EC11_SW_PORT   GPIOC
-#define EC11_A_PIN     GPIO_PIN_1
-#define EC11_A_PORT    GPIOC
-#define EC11_B_PIN     GPIO_PIN_2
-#define EC11_B_PORT    GPIOC
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdbool.h>
+#include "gpio.h"
 
-//?????
-typedef struct
-{
-  int16_t cnt;        //??????
-  uint8_t dir;        //1:?? -1:?? 0:??
-  uint8_t key_flag;   //1????
-}EC11_t;
 
-extern EC11_t ec11;
+#define EC11_PH_A HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_0)
+#define EC11_PH_B HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_1)
+#define _BV(n) (1<<(n))
+#define ENCODER_PULSES_PER_STEP 4
 
-void EC11_Scan(void); //1ms????
-uint8_t EC11_GetKey(void);
-int16_t EC11_GetCnt(void);
-void EC11_ClearCnt(void);
+void EC11_init(void);
+void EC11_timer(void);
+void EC11_update(void);
 
 #endif

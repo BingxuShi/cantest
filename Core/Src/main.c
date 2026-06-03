@@ -20,11 +20,9 @@
 #include "main.h"
 #include "can.h"
 #include "spi.h"
+#include "tim.h"
 #include "usart.h"
 #include "gpio.h"
-#include <string.h>
-#include <stdio.h>
-
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -73,27 +71,42 @@ void SystemClock_Config(void);
 		return ch;
 	}
 	
-	HAL_StatusTypeDef CAN_Send_Data(CAN_HandleTypeDef *hcan, uint32_t stdId, uint8_t *data, uint8_t len, uint32_t timeout)
+	HAL_StatusTypeDef CAN_Send_Msg(CAN_HandleTypeDef *hcan, uint16_t id, uint8_t *pData, uint8_t len)
 {
-    CAN_TxHeaderTypeDef TxHeader;
-    uint32_t TxMailbox;
+  CAN_TxHeaderTypeDef TxHeader;
+  uint32_t TxMailbox;
 
-    // 1. ???????
-    TxHeader.StdId = stdId;       // ?? ID
-    TxHeader.ExtId = 0x00;        // ?? ID (?????0)
-    TxHeader.IDE = CAN_ID_STD;    // ???? ID
-    TxHeader.RTR = CAN_RTR_DATA;  // ??? (?????)
-    TxHeader.DLC = len;           // ????
-    TxHeader.TransmitGlobalTime = DISABLE;
+  TxHeader.StdId = id;                // ??ID 11?
+  TxHeader.ExtId = 0x00;              // ??ID????0
+  TxHeader.RTR = CAN_RTR_DATA;        // ???
+  TxHeader.IDE = CAN_ID_STD;          // ?????
+  TxHeader.DLC = len;                 // ???? 0~8
+  TxHeader.TransmitGlobalTime = DISABLE;
 
-    // 2. ?????????
-    // HAL_CAN_AddTxMessage ?????????,?????
-    if (HAL_CAN_AddTxMessage(hcan, &TxHeader, data, &TxMailbox) != HAL_OK)
-    {
-        // ?????????
-        return HAL_ERROR;
-    }
-	}
+  // HAL? CAN ????
+  return HAL_CAN_AddTxMessage(hcan, &TxHeader, pData, &TxMailbox);
+}
+
+HAL_StatusTypeDef CAN_Send_Ext_Msg(CAN_HandleTypeDef *hcan, uint32_t extId, uint8_t *pData, uint8_t len)
+{
+  CAN_TxHeaderTypeDef TxHeader;
+  uint32_t TxMailbox;
+
+  TxHeader.StdId = 0x00;
+  TxHeader.ExtId = extId;
+  TxHeader.RTR = CAN_RTR_DATA;
+  TxHeader.IDE = CAN_ID_EXT;   // ???
+  TxHeader.DLC = len;
+  TxHeader.TransmitGlobalTime = DISABLE;
+
+  return HAL_CAN_AddTxMessage(hcan, &TxHeader, pData, &TxMailbox);
+}
+
+uint8_t can_tx_buf[8] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88};
+
+
+
+
 /* USER CODE END 0 */
 
 /**
@@ -129,9 +142,9 @@ int main(void)
   MX_CAN2_Init();
   MX_SPI1_Init();
   MX_USART1_UART_Init();
-	
+  MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
-
+	
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -141,12 +154,12 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-		char msg[] = "Hello World!123\r\n";
-		HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), 100);
-		HAL_Delay(1000); 
-		uint8_t txData[] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08};
-		HAL_StatusTypeDef status = CAN_Send_Data(&hcan1, 0x123, txData, 8, 100);
-		//printf("Hello World! (Method 2 - printf)\r\n");
+		
+		//char msg[] = "Hello World!123\r\n";
+		//HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), 100);
+		HAL_Delay(100); 
+		CAN_Send_Msg(&hcan1, 0x123, can_tx_buf, 4); 
+		
   }
   /* USER CODE END 3 */
 }

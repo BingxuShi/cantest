@@ -13,8 +13,7 @@
 #define _BV(n) (1<<(n))
 #define ENCODER_PULSES_PER_STEP 4
 
-void EC11_init(void);
-void EC11_timer(void);
+
 void EC11_update(void);
 
 #endif

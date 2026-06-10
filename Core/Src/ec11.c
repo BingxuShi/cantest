@@ -1,4 +1,7 @@
+
+
 #include "ec11.h"
+#include "usart.h"
 
 unsigned int led_num = 0;
 bool CW ;
@@ -62,9 +65,11 @@ void EC11_update(void) {
         if (abs(EC11_encoder_diff) >= ENCODER_PULSES_PER_STEP) {
             if(EC11_encoder_diff < 0) {
                 CW = true;
+								HAL_UART_Transmit(&huart1, "zz", 2, 100);
             }
             if(EC11_encoder_diff > 0) {
                 CCW = true;
+								HAL_UART_Transmit(&huart1, "fz", 2, 100);
             }
             
         }

@@ -1,8 +1,8 @@
 cantest\ec11.o: ..\Core\Src\ec11.c
 cantest\ec11.o: ../Core/Inc/ec11.h
-cantest\ec11.o: C:\Users\37068\AppData\Local\Keil_v5\ARM\ARMCC\Bin\..\include\stdio.h
-cantest\ec11.o: C:\Users\37068\AppData\Local\Keil_v5\ARM\ARMCC\Bin\..\include\stdlib.h
-cantest\ec11.o: C:\Users\37068\AppData\Local\Keil_v5\ARM\ARMCC\Bin\..\include\stdbool.h
+cantest\ec11.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\stdio.h
+cantest\ec11.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\stdlib.h
+cantest\ec11.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\stdbool.h
 cantest\ec11.o: ../Core/Inc/gpio.h
 cantest\ec11.o: ../Core/Inc/main.h
 cantest\ec11.o: ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal.h
@@ -12,14 +12,14 @@ cantest\ec11.o: ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_def.h
 cantest\ec11.o: ../Drivers/CMSIS/Device/ST/STM32F1xx/Include/stm32f1xx.h
 cantest\ec11.o: ../Drivers/CMSIS/Device/ST/STM32F1xx/Include/stm32f105xc.h
 cantest\ec11.o: ../Drivers/CMSIS/Include/core_cm3.h
-cantest\ec11.o: C:\Users\37068\AppData\Local\Keil_v5\ARM\ARMCC\Bin\..\include\stdint.h
+cantest\ec11.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\stdint.h
 cantest\ec11.o: ../Drivers/CMSIS/Include/cmsis_version.h
 cantest\ec11.o: ../Drivers/CMSIS/Include/cmsis_compiler.h
 cantest\ec11.o: ../Drivers/CMSIS/Include/cmsis_armcc.h
 cantest\ec11.o: ../Drivers/CMSIS/Device/ST/STM32F1xx/Include/system_stm32f1xx.h
 cantest\ec11.o: ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal.h
 cantest\ec11.o: ../Drivers/STM32F1xx_HAL_Driver/Inc/Legacy/stm32_hal_legacy.h
-cantest\ec11.o: C:\Users\37068\AppData\Local\Keil_v5\ARM\ARMCC\Bin\..\include\stddef.h
+cantest\ec11.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\stddef.h
 cantest\ec11.o: ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_rcc_ex.h
 cantest\ec11.o: ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_gpio.h
 cantest\ec11.o: ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_gpio_ex.h
@@ -35,3 +35,4 @@ cantest\ec11.o: ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_spi.h
 cantest\ec11.o: ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_tim.h
 cantest\ec11.o: ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_tim_ex.h
 cantest\ec11.o: ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_uart.h
+cantest\ec11.o: ../Core/Inc/usart.h

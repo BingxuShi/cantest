@@ -24,6 +24,8 @@
 #include "tim.h"
 #include "usart.h"
 #include "gpio.h"
+#include "ec11.h"
+#include "st7789v.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -142,24 +144,32 @@ int main(void)
   MX_CAN1_Init();
   MX_CAN2_Init();
   MX_SPI1_Init();
+	
   MX_USART1_UART_Init();
   MX_TIM2_Init();
-  /* USER CODE BEGIN 2 */
 	
+	
+  /* USER CODE BEGIN 2 */
+	LCD_Init();
   /* USER CODE END 2 */
 
   /* Infinite loop */
+	LCD_FillScreen(COLOR_WHITE);
+	//LCD_FillCircle(120, 140, 30, COLOR_CYAN);
+	
   /* USER CODE BEGIN WHILE */
   while (1)
   {
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-		
+		EC11_update();
 		//char msg[] = "Hello World!123\r\n";
 		//HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), 100);
-		HAL_Delay(100); 
-		CAN_Send_Msg(&hcan1, 0x123, can_tx_buf, 4); 
+		HAL_Delay(5); 
+		
+		
+		//CAN_Send_Msg(&hcan1, 0x123, can_tx_buf, 4); 
 		
   }
   /* USER CODE END 3 */

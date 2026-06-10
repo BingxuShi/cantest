@@ -9,6 +9,7 @@
 "cantest\usart.o"
 "cantest\stm32f1xx_it.o"
 "cantest\stm32f1xx_hal_msp.o"
+"cantest\st7789v.o"
 "cantest\stm32f1xx_hal_gpio_ex.o"
 "cantest\stm32f1xx_hal_can.o"
 "cantest\stm32f1xx_hal.o"

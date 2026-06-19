@@ -22,9 +22,18 @@ extern "C" {
  *   BLK  -> PB1  (GPIO 输出)
  *
  * CubeMX 配置要点：
- *   - SPI1: Mode=Transmit Only Master, NSS=Software
- *           Data Size=8Bit, CPOL=High, CPHA=2Edge (Mode3)
- *           Prescaler 按需设置（建议 4 分频，即 18MHz）
+ *   - SPI1 挂载在 APB2 总线，速度 = PCLK2 / Prescaler
+ *
+ *     HCLK=72MHz 时（APB2通常不分频，PCLK2=72MHz）：
+ *       Prescaler /2 → 36MHz（推荐，速度快且在ST7789V耐受范围内）
+ *       Prescaler /4 → 18MHz（最保守）
+ *       不建议 /1=72MHz，可能超出屏幕SPI耐受上限导致花屏
+ *
+ *     HCLK=8MHz 时（PCLK2=8MHz）：
+ *       Prescaler /1 或 /2 即可，无需过度分频
+ *
+ *   - Mode=Transmit Only Master, NSS=Software
+ *     Data Size=8Bit, CPOL=High, CPHA=2Edge (Mode3)
  *   - PC4/PC5/PB0/PB1: GPIO_Output, Push-Pull, No pull
  ******************************************************************************
  */
@@ -78,9 +87,9 @@ extern SPI_HandleTypeDef hspi1;
 #define LCD_WIDTH           240U
 #define LCD_HEIGHT          280U
 
-/* 部分屏幕存在行偏移，如无偏移置0；常见值：20 */
+/* ST7789V 内部 GRAM 为 240×320，240×280 屏幕行地址偏移 20 */
 #define LCD_X_OFFSET        0U
-#define LCD_Y_OFFSET        0U
+#define LCD_Y_OFFSET        20U
 
 /*============================================================
  * 常用颜色（RGB565）

@@ -513,9 +513,11 @@ void GUI_Menu_Init(MenuItem_t *root, uint8_t count)
  * ============================================================ */
 void GUI_Menu_Process(void)
 {
-    /* EC11 轮询（旋转解码 + 按键消抖 + 长按检测）*/
-    EC11_Poll();
-
+    /* 注意：EC11_Poll() 不再在此调用！
+     * 现在由定时器中断（例如 TIM6，2ms周期）独立驱动 EC11_Poll()，
+     * 与本函数（含屏幕SPI绘制）完全解耦，互不阻塞。
+     * 详见 ec11.h 中的"定时器中断驱动"用法说明。
+     * 此处只需要读取已经在中断里采集好的事件即可。 */
     uint32_t ev = EC11_GetEvents();
 
     if (ev != 0U)
@@ -549,3 +551,4 @@ void GUI_Menu_Process(void)
     if (s_ctx.need_redraw)
         GUI_Menu_Redraw();
 }
+

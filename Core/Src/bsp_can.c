@@ -45,6 +45,12 @@ static CAN_RxCallback_t s_can1_callback = NULL;
 static CAN_RxCallback_t s_can2_callback = NULL;
 
 /* ============================================================
+ * 发送成功/失败累计计数（供 BSP_CAN_GetStatus 上报给界面）
+ * ============================================================ */
+static uint32_t s_tx_ok_count[2]   = {0, 0};   /* [0]=CAN1, [1]=CAN2 */
+static uint32_t s_tx_fail_count[2] = {0, 0};
+
+/* ============================================================
  * 波特率参数：基于实际 APB1 时钟动态计算（而非固定写死）
  *
  * 重要：原方案按固定 72MHz/36MHz 写死 Prescaler，
@@ -306,6 +312,7 @@ HAL_StatusTypeDef BSP_CAN_Send(CAN_Channel_t ch, CAN_Msg_t *msg)
     if (HAL_CAN_GetTxMailboxesFreeLevel(phcan) == 0U)
     {
         uint32_t now = HAL_GetTick();
+        s_tx_fail_count[ch_idx]++;
         if ((now - s_last_err_log_tick[ch_idx]) >= 1000U)   /* 每通道最多1秒打印一次 */
         {
             s_last_err_log_tick[ch_idx] = now;
@@ -333,8 +340,13 @@ HAL_StatusTypeDef BSP_CAN_Send(CAN_Channel_t ch, CAN_Msg_t *msg)
 
     ret = HAL_CAN_AddTxMessage(phcan, &tx_header, msg->data, &tx_mailbox);
 
-    if (ret != HAL_OK)
+    if (ret == HAL_OK)
     {
+        s_tx_ok_count[ch_idx]++;
+    }
+    else
+    {
+        s_tx_fail_count[ch_idx]++;
         uint32_t now = HAL_GetTick();
         if ((now - s_last_err_log_tick[ch_idx]) >= 1000U)
         {
@@ -345,6 +357,55 @@ HAL_StatusTypeDef BSP_CAN_Send(CAN_Channel_t ch, CAN_Msg_t *msg)
     }
 
     return ret;
+}
+
+/* ============================================================
+ * BSP_CAN_GetStatus —— 解析 ESR 寄存器，输出结构化总线状态
+ *
+ * ESR 寄存器位定义（参考 STM32F1 参考手册 bxCAN 章节）：
+ *   bit0    EWGF — Error Warning Flag
+ *   bit1    EPVF — Error Passive Flag
+ *   bit2    BOFF — Bus-Off Flag
+ *   bit4:6  LEC  — Last Error Code
+ *   bit16:23 TEC — Transmit Error Counter
+ *   bit24:31 REC — Receive Error Counter
+ * ============================================================ */
+void BSP_CAN_GetStatus(CAN_Channel_t ch, CAN_BusStatus_t *status)
+{
+    CAN_HandleTypeDef *phcan = (ch == CAN_CH_1) ? &hcan1 : &hcan2;
+    uint8_t ch_idx = (ch == CAN_CH_1) ? 0U : 1U;
+    uint32_t esr;
+
+    if (status == NULL) return;
+
+    esr = phcan->Instance->ESR;
+
+    status->error_warning = (uint8_t)(esr & 0x1U);
+    status->error_passive = (uint8_t)((esr >> 1U) & 0x1U);
+    status->bus_off        = (uint8_t)((esr >> 2U) & 0x1U);
+    status->lec            = (CAN_LecError_t)((esr >> 4U) & 0x7U);
+    status->tec            = (uint8_t)((esr >> 16U) & 0xFFU);
+    status->rec            = (uint8_t)((esr >> 24U) & 0xFFU);
+    status->tx_ok_count   = s_tx_ok_count[ch_idx];
+    status->tx_fail_count = s_tx_fail_count[ch_idx];
+}
+
+/* ============================================================
+ * BSP_CAN_LecToString
+ * ============================================================ */
+const char *BSP_CAN_LecToString(CAN_LecError_t lec)
+{
+    switch (lec)
+    {
+        case CAN_LEC_NONE:    return "OK";
+        case CAN_LEC_STUFF:   return "StuffErr";
+        case CAN_LEC_FORM:    return "FormErr";
+        case CAN_LEC_ACK:     return "AckErr";
+        case CAN_LEC_BIT_REC: return "BitRecErr";
+        case CAN_LEC_BIT_DOM: return "BitDomErr";
+        case CAN_LEC_CRC:     return "CrcErr";
+        default:              return "Unknown";
+    }
 }
 
 /* ============================================================
@@ -449,10 +510,13 @@ void BSP_CAN_RxFifoCallback(CAN_HandleTypeDef *hcan)
         }
         msg.dlc = (uint8_t)rx_header.DLC;
 
-        DEBUG_PRINTF("[CAN%d] RX id=0x%lX dlc=%d data=%02X %02X %02X %02X %02X %02X %02X %02X\n",
-                     ch_num, msg.id, msg.dlc,
-                     msg.data[0], msg.data[1], msg.data[2], msg.data[3],
-                     msg.data[4], msg.data[5], msg.data[6], msg.data[7]);
+        /* 注意：此处刻意不打印每帧报文的 DEBUG_PRINTF！
+         * 本回调运行在 CAN1/CAN2_RX0 中断上下文，如果总线流量较大
+         * （例如 Simulation mode 50ms周期发送，且总线上有应答/自环），
+         * 频繁的格式化打印会显著拖慢本中断执行时间，与 TIM6（2ms周期
+         * 驱动EC11采样）的中断产生相互干扰，是"EC11大部分时间没反应"
+         * 的潜在根因之一。如需查看收到的报文，请在主循环里通过
+         * BSP_CAN_Receive() 取出后再打印（不占用中断时间）。 */
 
         /* 区分 CAN1 / CAN2 */
         if (hcan->Instance == CAN1)
@@ -488,11 +552,28 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
 
 /* ============================================================
  * HAL CAN 错误回调（调试用：BusOff / 应答错误等会在此打印）
+ *
+ * 限流说明：此回调运行在 CAN1/CAN2_SCE 中断上下文。如果总线存在
+ * 持续性错误（例如未接终端电阻导致间歇性 ACK/Stuff Error），该
+ * 中断可能被高频反复触发，每次最多打印9条 DEBUG_PRINTF，会显著
+ * 拖慢中断执行时间，进而与 TIM6（2ms周期驱动EC11采样）产生干扰。
+ * 加入限流：同一通道最多每500ms打印一次完整错误详情。
  * ============================================================ */
 void HAL_CAN_ErrorCallback(CAN_HandleTypeDef *hcan)
 {
-    uint8_t ch_num = (hcan->Instance == CAN1) ? 1U : 2U;
-    uint32_t err   = HAL_CAN_GetError(hcan);
+    static uint32_t s_last_err_print_tick[2] = {0, 0};
+    uint8_t  ch_num = (hcan->Instance == CAN1) ? 1U : 2U;
+    uint8_t  ch_idx = (hcan->Instance == CAN1) ? 0U : 1U;
+    uint32_t err    = HAL_CAN_GetError(hcan);
+    uint32_t now    = HAL_GetTick();
+
+    /* 即使跳过打印，错误状态仍需清除，否则同一错误会反复触发中断 */
+    if ((now - s_last_err_print_tick[ch_idx]) < 500U)
+    {
+        HAL_CAN_ResetError(hcan);
+        return;
+    }
+    s_last_err_print_tick[ch_idx] = now;
 
     DEBUG_PRINTF("[CAN%d] ErrorCallback ErrorCode=0x%08lX ESR=0x%08lX\n",
                  ch_num, err, hcan->Instance->ESR);
@@ -518,3 +599,4 @@ void HAL_CAN_ErrorCallback(CAN_HandleTypeDef *hcan)
 
     HAL_CAN_ResetError(hcan);
 }
+

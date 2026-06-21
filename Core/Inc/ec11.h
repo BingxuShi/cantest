@@ -10,7 +10,7 @@ extern "C" {
 /**
  ******************************************************************************
  * @file    ec11.h
- * @brief   EC11 旋转编码器驱动（HAL库，轮询+正交状态机，无需EXTI中断）
+ * @brief   EC11 旋转编码器驱动（HAL库，正交状态机，无需EXTI中断）
  *
  * 硬件连接：
  *   A 相 -> PC1  (GPIO 普通输入，上拉)
@@ -23,10 +23,40 @@ extern "C" {
  *   PC2: GPIO_Input, Pull-up, 标签 EC11_B
  *   NVIC: 不需要使能任何 EXTI
  *
- * 使用方法：
- *   在 while(1) 中以固定间隔（建议 1~5ms）调用 EC11_Poll()，
- *   然后通过 EC11_GetEvents() 取事件即可。
- *   不需要在 HAL_GPIO_EXTI_Callback 中做任何处理。
+ * —— 推荐用法：定时器中断驱动（与屏幕刷新解耦，互不干扰）——
+ *
+ *   EC11_Poll() 本身只做 GPIO 读取 + 简单逻辑判断，执行时间在微秒级，
+ *   非常适合放进定时器中断里周期调用，例如配置 TIM6/TIM7 等基本定时器，
+ *   2ms 中断一次：
+ *
+ *     void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+ *     {
+ *         if (htim->Instance == TIM6)
+ *         {
+ *             EC11_Poll();   // 仅此一行，耗时极短，不影响其他中断
+ *         }
+ *     }
+ *
+ *   这样 EC11 的采样完全独立于主循环中屏幕SPI绘制的耗时，
+ *   即使屏幕刷新需要几十毫秒，EC11 依然每 2ms 精确采样，
+ *   不会丢失任何一次旋转步进或按键边沿——这正是"两者互不干扰"的关键。
+ *
+ *   主循环中只需调用 EC11_GetEvents() 取事件即可，不需要再调用 Poll：
+ *
+ *     while (1) {
+ *         uint32_t ev = EC11_GetEvents();
+ *         // ... 处理 ev，绘制屏幕 ...
+ *     }
+ *
+ *   线程安全说明：EC11_GetEvents() / EC11_GetCount() / EC11_ResetCount() /
+ *   EC11_ResetKeyState() 内部已加临界区保护（__disable_irq/__enable_irq），
+ *   可以安全地在主循环中调用，不会与定时器中断里的 EC11_Poll() 产生竞态。
+ *
+ * —— 备用用法：主循环轮询（如不想占用定时器资源）——
+ *
+ *   也可以继续在 while(1) 中以固定间隔（建议 1~5ms）直接调用 EC11_Poll()，
+ *   两种用法二选一，不要同时用（否则同一引脚会被读取两次，
+ *   虽不会出错但没有意义）。
  *
  * 抗抖动原理：
  *   采用 4步正交状态机（Ben Buxton 算法）。
@@ -127,6 +157,13 @@ void     EC11_ResetCount(void);
  *         重新开始判断，不带任何历史残留。
  */
 void     EC11_ResetKeyState(void);
+
+/**
+ * @brief  调试用：获取 EC11_Poll() 被调用的累计次数（心跳计数）
+ *         用于验证驱动该函数的定时器中断实际触发频率是否正常。
+ *         用法见 ec11.c 中 EC11_GetHeartbeat() 实现处的注释。
+ */
+uint32_t EC11_GetHeartbeat(void);
 
 #ifdef __cplusplus
 }

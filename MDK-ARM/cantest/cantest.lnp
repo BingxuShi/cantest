@@ -2,11 +2,11 @@
 "cantest\startup_stm32f105xc.o"
 "cantest\ec11.o"
 "cantest\st7789v.o"
-"cantest\gui_menu_1.o"
+"cantest\gui_menu.o"
 "cantest\bsp_can.o"
 "cantest\segger_rtt.o"
 "cantest\segger_rtt_printf.o"
-"cantest\main_1.o"
+"cantest\main.o"
 "cantest\gpio.o"
 "cantest\can.o"
 "cantest\spi.o"
@@ -30,7 +30,7 @@
 "cantest\stm32f1xx_hal_tim.o"
 "cantest\stm32f1xx_hal_tim_ex.o"
 "cantest\stm32f1xx_hal_uart.o"
-"cantest\system_stm32f1xx_1.o"
+"cantest\system_stm32f1xx.o"
 --strict --scatter "cantest\cantest.sct"
 --summary_stderr --info summarysizes --map --load_addr_map_info --xref --callgraph --symbols
 --info sizes --info totals --info unused --info veneers

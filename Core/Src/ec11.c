@@ -45,6 +45,12 @@ static const uint8_t QSM_TABLE[16] = {
 /* 步进累加器，满±4输出一次事件 */
 static int8_t s_step_acc = 0;
 
+/* 心跳计数：每次EC11_Poll调用都自增一次，用于诊断TIM6实际触发频率。
+ * 例如在主循环里每1000ms读取一次差值，理论上应该约等于500（2ms周期）。
+ * 如果实测值远小于500，说明TIM6中断被其他更高优先级中断/某种
+ * 阻塞操作严重拖慢了实际触发频率。 */
+static volatile uint32_t s_poll_heartbeat = 0U;
+
 /* ============================================================
  * EC11_Init
  * ============================================================ */
@@ -94,7 +100,14 @@ void EC11_Poll(void)
                 s_step_acc = 0;
                 hec11.count++;
                 hec11.events |= EC11_EVT_CW;
-                DEBUG_PRINTF("[EC11] CW fired, A=%d B=%d qsm=%d\n", a, b, hec11.qsm_state);
+                /* 注意：此处刻意不打印 DEBUG_PRINTF！
+                 * EC11_Poll 现在运行在 TIM6 中断（2ms周期）中，
+                 * RTT printf 涉及字符串格式化+缓冲区写入，在中断
+                 * 上下文里频繁调用会显著拖慢本次中断的执行时间，
+                 * 导致下一次 TIM6 中断被推迟，表现为"旋转大部分
+                 * 时间没反应"——这正是本次问题的根因。
+                 * 如需调试，使用下方的 s_poll_heartbeat 计数器，
+                 * 在主循环里低频读取打印，不占用中断时间。 */
             }
         }
         else if (delta == 2U)   /* CCW 步进 */
@@ -105,7 +118,7 @@ void EC11_Poll(void)
                 s_step_acc = 0;
                 hec11.count--;
                 hec11.events |= EC11_EVT_CCW;
-                DEBUG_PRINTF("[EC11] CCW fired, A=%d B=%d qsm=%d\n", a, b, hec11.qsm_state);
+                /* 同上，不在中断里打印 */
             }
         }
     }
@@ -137,7 +150,7 @@ void EC11_Poll(void)
                     hec11.key_pressed   = 1U;
                     hec11.key_down_tick = now;
                     hec11.long_fired    = 0U;
-                    DEBUG_PRINTF("[EC11] KEY pressed confirmed, tick=%lu\n", now);
+                    /* 不在中断里打印，理由同上 */
                 }
                 else
                 {
@@ -145,10 +158,9 @@ void EC11_Poll(void)
                     if (hec11.key_pressed == 1U)
                     {
                         hec11.key_pressed = 0U;
-                        DEBUG_PRINTF("[EC11] KEY released confirmed, held=%lu ms\n",
-                                     now - hec11.key_down_tick);
                         if (hec11.long_fired == 0U)
                             hec11.events |= EC11_EVT_KEY_SHORT;
+                        /* 不在中断里打印，理由同上 */
                     }
                 }
             }
@@ -161,25 +173,64 @@ void EC11_Poll(void)
             {
                 hec11.long_fired  = 1U;
                 hec11.events     |= EC11_EVT_KEY_LONG;
-                DEBUG_PRINTF("[EC11] LONG fired, key_pressed=%d key_stable=%d raw=%d\n",
-                             hec11.key_pressed, hec11.key_stable, key_raw);
+                /* 不在中断里打印，理由同上 */
             }
         }
+
+        /* 心跳计数：每次Poll都自增，不涉及任何耗时操作（仅一条加法指令）。
+         * 用于在主循环里低频验证TIM6的实际触发频率是否符合预期(2ms一次)，
+         * 调试方法见 EC11_GetHeartbeat() 的注释。 */
+        s_poll_heartbeat++;
     }
 }
 
 /* ============================================================
  * EC11_GetEvents  —  读取并清除所有事件
+ *
+ * 临界区保护说明：
+ *   EC11_Poll() 现在运行在定时器中断中，而本函数运行在主循环里，
+ *   存在"中断写、主循环读"的共享变量竞态：
+ *     主循环读取 hec11.events 之后、清零之前，
+ *     如果定时器中断恰好在这个窗口触发并写入新事件，
+ *     紧接着主循环执行清零，会把这个新事件无声丢弃。
+ *   用 __disable_irq/__enable_irq 包裹"读取+清零"，
+ *   确保这两步操作不会被中断打断，是原子的。
+ *   临界区极短（仅两条赋值语句），不会影响中断响应实时性。
  * ============================================================ */
 uint32_t EC11_GetEvents(void)
 {
-    uint32_t ev   = hec11.events;
+    uint32_t ev;
+    uint32_t primask = __get_PRIMASK();
+
+    __disable_irq();
+    ev            = hec11.events;
     hec11.events  = EC11_EVT_NONE;
+    if (!primask) __enable_irq();
+
     return ev;
 }
 
-int32_t EC11_GetCount(void)   { return hec11.count; }
-void    EC11_ResetCount(void) { hec11.count = 0; s_step_acc = 0; }
+int32_t EC11_GetCount(void)
+{
+    int32_t cnt;
+    uint32_t primask = __get_PRIMASK();
+
+    __disable_irq();
+    cnt = hec11.count;
+    if (!primask) __enable_irq();
+
+    return cnt;
+}
+
+void EC11_ResetCount(void)
+{
+    uint32_t primask = __get_PRIMASK();
+
+    __disable_irq();
+    hec11.count = 0;
+    s_step_acc  = 0;
+    if (!primask) __enable_irq();
+}
 
 /* ============================================================
  * EC11_ResetKeyState
@@ -193,15 +244,45 @@ void EC11_ResetKeyState(void)
     uint32_t now     = HAL_GetTick();
     uint8_t  key_raw = (HAL_GPIO_ReadPin(EC11_KEY_PORT, EC11_KEY_PIN) == GPIO_PIN_SET)
                        ? 1U : 0U;
+    uint32_t primask = __get_PRIMASK();
 
+    /* EC11_Poll() 运行在定时器中断中，本函数运行在主循环里，
+     * 一次性写入多个字段，必须作为原子操作，否则定时器中断
+     * 可能在写到一半时打入，读到不一致的中间状态 */
+    __disable_irq();
     hec11.key_last        = key_raw;
     hec11.key_stable       = key_raw;
     hec11.key_change_tick  = now;
-    hec11.key_pressed      = 0U;   /* 强制视为未按下，等下一次真实"变化"再重新判断，
-                                     * 避免把切换前残留的按下状态带入新状态 */
+    hec11.key_pressed      = 0U;   /* 强制视为未按下，等下一次真实"变化"再重新判断 */
     hec11.key_down_tick    = now;
     hec11.long_fired        = 0U;
     hec11.events            = EC11_EVT_NONE;
+    if (!primask) __enable_irq();
 
     DEBUG_PRINTF("[EC11] ResetKeyState: raw=%d now=%lu\n", key_raw, now);
+}
+
+/* ============================================================
+ * EC11_GetHeartbeat
+ *
+ * 调试用：返回 EC11_Poll() 被调用的累计次数。
+ * 用法（在主循环里，每隔约1秒读取一次差值）：
+ *
+ *   static uint32_t last_hb = 0, last_tick = 0;
+ *   uint32_t now = HAL_GetTick();
+ *   if (now - last_tick >= 1000U) {
+ *       uint32_t hb = EC11_GetHeartbeat();
+ *       DEBUG_PRINTF("[EC11] heartbeat delta=%lu (expect ~500 for 2ms period)\n",
+ *                    hb - last_hb);
+ *       last_hb   = hb;
+ *       last_tick = now;
+ *   }
+ *
+ * 若实测值远小于500（例如只有几十），说明TIM6中断的实际触发频率
+ * 被严重拖慢，需要检查 NVIC 优先级配置，或者是否有其他中断/
+ * 代码长时间关闭了全局中断（__disable_irq 持续时间过长）。
+ * ============================================================ */
+uint32_t EC11_GetHeartbeat(void)
+{
+    return s_poll_heartbeat;
 }

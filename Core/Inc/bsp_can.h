@@ -107,6 +107,36 @@ typedef struct
 } CAN_RxFifo_t;
 
 /* ============================================================
+ * CAN 最近一次错误类型（对应 ESR 的 LEC 字段）
+ * ============================================================ */
+typedef enum
+{
+    CAN_LEC_NONE        = 0U,
+    CAN_LEC_STUFF       = 1U,   /* 位填充错误：几乎总是波特率不匹配 */
+    CAN_LEC_FORM        = 2U,   /* 格式错误：同上 */
+    CAN_LEC_ACK         = 3U,   /* 应答错误：总线无其他节点应答/接线断开 */
+    CAN_LEC_BIT_REC     = 4U,   /* 期望隐性位但读到显性位 */
+    CAN_LEC_BIT_DOM     = 5U,   /* 期望显性位但读到隐性位 */
+    CAN_LEC_CRC         = 6U,   /* CRC校验错误 */
+    CAN_LEC_SW_SET      = 7U,   /* 软件设置（未使用）*/
+} CAN_LecError_t;
+
+/* ============================================================
+ * CAN 总线健康状态（供上层界面显示）
+ * ============================================================ */
+typedef struct
+{
+    uint8_t  bus_off;        /* 1=已进入Bus-Off（总线已停止工作）*/
+    uint8_t  error_passive;  /* 1=错误被动态（错误计数较高但未到Bus-Off）*/
+    uint8_t  error_warning;  /* 1=错误警告态（早期预警）*/
+    uint8_t  tec;            /* 发送错误计数器 0~255 */
+    uint8_t  rec;            /* 接收错误计数器 0~255 */
+    CAN_LecError_t lec;      /* 最近一次错误类型 */
+    uint32_t tx_fail_count;  /* 累计发送失败次数（邮箱满/AddTxMessage失败）*/
+    uint32_t tx_ok_count;    /* 累计发送成功次数 */
+} CAN_BusStatus_t;
+
+/* ============================================================
  * API
  * ============================================================ */
 
@@ -122,8 +152,9 @@ HAL_StatusTypeDef BSP_CAN_Init(CAN_Channel_t ch,
                                CAN_RxCallback_t callback);
 
 /**
- * @brief  发送一帧报文（阻塞等待邮箱空闲，超时 10ms）
- * @retval HAL_OK / HAL_ERROR / HAL_TIMEOUT
+ * @brief  发送一帧报文（非阻塞：邮箱满或发送失败立即返回，不等待）
+ * @retval HAL_OK=已成功放入发送邮箱  HAL_BUSY=邮箱已满，本次跳过
+ *         HAL_ERROR=参数错误
  */
 HAL_StatusTypeDef BSP_CAN_Send(CAN_Channel_t ch, CAN_Msg_t *msg);
 
@@ -142,6 +173,18 @@ uint16_t BSP_CAN_GetRxCount(CAN_Channel_t ch);
  * @brief  清空接收 FIFO
  */
 void BSP_CAN_FlushRx(CAN_Channel_t ch);
+
+/**
+ * @brief  获取指定通道当前的总线健康状态（供界面实时显示）
+ * @param  ch      通道
+ * @param  status  输出参数，调用方提供存储空间
+ */
+void BSP_CAN_GetStatus(CAN_Channel_t ch, CAN_BusStatus_t *status);
+
+/**
+ * @brief  将 LEC 错误码转为简短英文描述（用于界面/日志显示）
+ */
+const char *BSP_CAN_LecToString(CAN_LecError_t lec);
 
 /**
  * @brief  设置过滤器（接收指定 ID，默认接收全部）

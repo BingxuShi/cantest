@@ -7,13 +7,15 @@
  ******************************************************************************
  */
 /* USER CODE END Header */
-
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "can.h"
 #include "spi.h"
+#include "tim.h"
+#include "usart.h"
 #include "gpio.h"
 
+/* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
 #include <string.h>
@@ -24,18 +26,39 @@
 #include "debug_rtt.h"
 /* USER CODE END Includes */
 
+/* Private typedef -----------------------------------------------------------*/
+/* USER CODE BEGIN PTD */
+
+/* USER CODE END PTD */
+
+/* Private define ------------------------------------------------------------*/
+/* USER CODE BEGIN PD */
+
+/* USER CODE END PD */
+
+/* Private macro -------------------------------------------------------------*/
+/* USER CODE BEGIN PM */
+
+/* USER CODE END PM */
+
 /* Private variables ---------------------------------------------------------*/
+
 /* USER CODE BEGIN PV */
+
+/* TIM7 中断（20ms周期）置位此标志，主循环检测到后执行一次UI刷新；
+ * volatile 保证主循环每次都从内存重新读取，不被编译器优化成寄存器缓存值 */
+static volatile uint8_t s_ui_tick_flag = 0U;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
-
 /* USER CODE BEGIN PFP */
 static void can1_rx_callback(CAN_Msg_t *msg);
 static void can2_rx_callback(CAN_Msg_t *msg);
 /* USER CODE END PFP */
 
+/* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
 /* ===========================================================
@@ -106,7 +129,7 @@ typedef struct
 } SimParam_t;
 
 static SimParam_t s_sim_params[SIM_PARAM_COUNT] = {
-    { "Speed",      SIM_SPEED_MIN, SIM_SPEED_MAX, 6 },
+    { "Speed",      SIM_SPEED_MIN, SIM_SPEED_MAX, 0 },
     { "Brake",      SIM_BOOL_MIN,  SIM_BOOL_MAX,  0 },
     { "Left_turn",  SIM_BOOL_MIN,  SIM_BOOL_MAX,  0 },
     { "Right_turn", SIM_BOOL_MIN,  SIM_BOOL_MAX,  0 },
@@ -118,9 +141,16 @@ static uint32_t   s_sim_last_tx    = 0U;
 static uint32_t   s_sim_tx_count   = 0U;
 
 /* ---- 布局参数 ---- */
-#define SIM_LIST_ITEM_H     40
-#define SIM_LIST_TOP_Y      (MENU_TITLE_H + 4)
-#define SIM_FOOTER_Y        (GUI_SCREEN_H - CHAR_H - 10)
+#define SIM_STATUS_BAR_H    22                          /* CAN总线状态行高度 */
+#define SIM_STATUS_BAR_Y    MENU_TITLE_H                /* 状态行紧贴标题栏下方 */
+#define SIM_LIST_ITEM_H     36
+#define SIM_LIST_TOP_Y      (MENU_TITLE_H + SIM_STATUS_BAR_H)
+#define SIM_FOOTER_Y        (GUI_SCREEN_H - CHAR_H - 8)
+
+/* CAN状态颜色：正常=绿，警告=黄，严重错误(Bus-Off/Passive)=红 */
+#define COL_STATUS_OK       COLOR_GREEN
+#define COL_STATUS_WARN     COLOR_YELLOW
+#define COL_STATUS_ERROR    COLOR_RED
 
 /* 根据当前4个参数值打包成712报文数据 */
 static void sim_build_712_data(uint8_t *data)
@@ -160,13 +190,83 @@ static void sim_draw_list_item(uint8_t idx)
                 GUI_COL_DIVIDER);
 }
 
+/* —— 绘制：CAN总线状态行（标题栏正下方，列表态/调节态都常驻显示）——
+ *
+ * 显示内容：CAN1通道的总线健康状态，颜色区分严重程度：
+ *   绿色：完全正常
+ *   黄色：Error Warning 或检测到最近一次错误（早期预警）
+ *   红色：Error Passive 或 Bus-Off（严重错误，发送大概率失败）
+ * 同时显示最近一次错误类型（LEC）和累计失败次数，
+ * 方便在没有RTT/电脑连接的情况下，仅看屏幕就能判断总线问题。
+ * ============================================================ */
+static CAN_BusStatus_t s_last_shown_status = {0};
+static uint8_t         s_status_first_draw = 1U;
+
+static void sim_draw_can_status(void)
+{
+    CAN_BusStatus_t st;
+    char line[40];
+    uint16_t color;
+    uint8_t  changed;
+
+    BSP_CAN_GetStatus(CAN_CH_1, &st);
+
+    /* 仅当状态真正变化时才重绘，避免每次tick都刷这一行造成额外SPI开销 */
+    changed = (uint8_t)(s_status_first_draw ||
+                        st.bus_off != s_last_shown_status.bus_off ||
+                        st.error_passive != s_last_shown_status.error_passive ||
+                        st.error_warning != s_last_shown_status.error_warning ||
+                        st.lec != s_last_shown_status.lec ||
+                        st.tx_fail_count != s_last_shown_status.tx_fail_count);
+
+    if (!changed) return;
+
+    s_last_shown_status = st;
+    s_status_first_draw = 0U;
+
+    if (st.bus_off || st.error_passive)
+        color = COL_STATUS_ERROR;
+    else if (st.error_warning || st.lec != CAN_LEC_NONE)
+        color = COL_STATUS_WARN;
+    else
+        color = COL_STATUS_OK;
+
+    LCD_FillRect(0, SIM_STATUS_BAR_Y, GUI_SCREEN_W, SIM_STATUS_BAR_H, GUI_COL_BG);
+
+    if (st.bus_off)
+    {
+        snprintf(line, sizeof(line), "CAN1: BUS-OFF! fail=%lu",
+                (unsigned long)st.tx_fail_count);
+    }
+    else if (st.error_passive)
+    {
+        snprintf(line, sizeof(line), "CAN1: PASSIVE TEC=%d REC=%d",
+                st.tec, st.rec);
+    }
+    else if (st.lec != CAN_LEC_NONE)
+    {
+        snprintf(line, sizeof(line), "CAN1: %s REC=%d fail=%lu",
+                BSP_CAN_LecToString(st.lec), st.rec,
+                (unsigned long)st.tx_fail_count);
+    }
+    else
+    {
+        snprintf(line, sizeof(line), "CAN1: OK  tx=%lu",
+                (unsigned long)st.tx_ok_count);
+    }
+
+    GUI_DrawString(MENU_TEXT_X,
+                  (uint16_t)(SIM_STATUS_BAR_Y + (SIM_STATUS_BAR_H - CHAR_H) / 2),
+                  line, color, GUI_COL_BG);
+}
+
 /* —— 绘制：发送状态行（标题栏下方，列表态/调节态都常驻显示）—— */
 static void sim_draw_tx_status(const uint8_t *data)
 {
     char line[40];
-    uint16_t y = MENU_TITLE_H + 4 + 4 * SIM_LIST_ITEM_H + 6;
+    uint16_t y = (uint16_t)(SIM_LIST_TOP_Y + SIM_PARAM_COUNT * SIM_LIST_ITEM_H + 4);
 
-    LCD_FillRect(0, y, GUI_SCREEN_W, (uint16_t)(CHAR_H * 2 + 12), GUI_COL_BG);
+    LCD_FillRect(0, y, GUI_SCREEN_W, (uint16_t)(CHAR_H * 2 + 8), GUI_COL_BG);
 
     snprintf(line, sizeof(line), "TX 0x%03X  cnt=%lu", SIM_ID_712, s_sim_tx_count);
     GUI_DrawString(MENU_TEXT_X, y, line, COLOR_CYAN, GUI_COL_BG);
@@ -187,6 +287,10 @@ static void sim_redraw_list(void)
     LCD_FillScreen(GUI_COL_BG);
     GUI_Page_DrawTitle("Simulation mode");
 
+    /* CAN状态行：强制下一次 sim_draw_can_status 重绘（全屏清屏后旧状态已失效）*/
+    s_status_first_draw = 1U;
+    sim_draw_can_status();
+
     for (uint8_t i = 0; i < SIM_PARAM_COUNT; i++)
         sim_draw_list_item(i);
 
@@ -205,10 +309,14 @@ static void sim_redraw_adjust(void)
     LCD_FillScreen(GUI_COL_BG);
     GUI_Page_DrawTitle(p->label);
 
-    GUI_DrawString(MENU_TEXT_X, 70, "Rotate to adjust", GUI_COL_ITEM_FG, GUI_COL_BG);
+    /* 调节态同样常驻显示CAN状态行，便于调参过程中也能看到总线情况 */
+    s_status_first_draw = 1U;
+    sim_draw_can_status();
+
+    GUI_DrawString(MENU_TEXT_X, 90, "Rotate to adjust", GUI_COL_ITEM_FG, GUI_COL_BG);
 
     snprintf(line, sizeof(line), "Range: %ld ~ %ld", (long)p->min, (long)p->max);
-    GUI_DrawString(MENU_TEXT_X, 100, line, GUI_COL_ITEM_FG, GUI_COL_BG);
+    GUI_DrawString(MENU_TEXT_X, 118, line, GUI_COL_ITEM_FG, GUI_COL_BG);
 
     GUI_DrawString(MENU_TEXT_X, (uint16_t)SIM_FOOTER_Y,
                   "Long: back to list", GUI_COL_ITEM_FG, GUI_COL_BG);
@@ -352,6 +460,11 @@ static uint8_t sim_page_on_tick(uint32_t events)
 
         BSP_CAN_Send(CAN_CH_1, &tx);
 
+        /* CAN状态行在列表态/调节态都常驻更新（实时反映总线健康度，
+         * sim_draw_can_status 内部已做"仅状态变化才重绘"的判断，
+         * 不会因为高频调用而产生不必要的SPI开销）*/
+        sim_draw_can_status();
+
         /* 发送状态行只在列表态显示更新（调节态界面不含该区域，
          * 避免在调节态时把数值显示区覆盖掉） */
         if (s_sim_state == SIM_STATE_LIST)
@@ -396,26 +509,42 @@ static MenuItem_t menu_root[] = {
 
 /* USER CODE END 0 */
 
-/* ===========================================================
- * main
- * =========================================================== */
+/**
+  * @brief  The application entry point.
+  * @retval int
+  */
 int main(void)
 {
-    HAL_Init();
 
-    DEBUG_INIT();
-    DEBUG_PRINTF("\n========== System Boot ==========\n");
+  /* USER CODE BEGIN 1 */
 
-    SystemClock_Config();
+  /* USER CODE END 1 */
 
-    MX_GPIO_Init();
-    MX_CAN1_Init();
-    MX_CAN2_Init();
-    MX_SPI1_Init();
+  /* MCU Configuration--------------------------------------------------------*/
 
-    DEBUG_PRINTF("[MAIN] Peripheral init done\n");
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
+  HAL_Init();
 
-    /* USER CODE BEGIN 2 */
+  /* USER CODE BEGIN Init */
+
+  /* USER CODE END Init */
+
+  /* Configure the system clock */
+  SystemClock_Config();
+
+  /* USER CODE BEGIN SysInit */
+
+  /* USER CODE END SysInit */
+
+  /* Initialize all configured peripherals */
+  MX_GPIO_Init();
+  MX_CAN1_Init();
+  MX_CAN2_Init();
+  MX_SPI1_Init();
+  MX_USART1_UART_Init();
+  MX_TIM6_Init();
+  MX_TIM7_Init();
+  /* USER CODE BEGIN 2 */
 
     LCD_Init();
     GUI_Menu_Init(menu_root, (uint8_t)MENU_ROOT_COUNT);
@@ -423,80 +552,173 @@ int main(void)
     BSP_CAN_Init(CAN_CH_1, CAN_BAUD_500K, can1_rx_callback);
     BSP_CAN_Init(CAN_CH_2, CAN_BAUD_500K, can2_rx_callback);
 
-    /* USER CODE END 2 */
+    /* —— 启动两个定时器中断 ——
+     * TIM6: EC11_Poll() 周期采样，与SPI绘制完全解耦，
+     *       无论屏幕刷新多慢，EC11都能精确按2ms采样，不丢事件
+     * TIM7: UI刷新节拍标志，主循环根据这个标志决定何时调用
+     *       GUI_Menu_Process()，避免主循环空转占满CPU（虽然对功能
+     *       无影响，但限制刷新节奏更利于功耗和CAN收发处理的及时性）*/
+    DEBUG_PRINTF("[MAIN] Starting TIM6 (EC11 2ms) and TIM7 (UI 20ms)...\n");
+    HAL_TIM_Base_Start_IT(&htim6);
+    HAL_TIM_Base_Start_IT(&htim7);
 
-    /* USER CODE BEGIN WHILE */
+  /* USER CODE END 2 */
+
+  /* Infinite loop */
+  /* USER CODE BEGIN WHILE */
+
+    /* —— 诊断用：每1秒打印一次TIM6心跳增量 ——
+     * 正常应显示约500（2ms周期 × 500次 = 1000ms）。
+     * 如果显示值远小于500，说明TIM6实际触发频率被拖慢，
+     * 是"EC11大部分时间没反应"的直接证据来源。
+     * 此打印在主循环里执行（非中断上下文），不会拖慢TIM6本身。
+     * 确认问题解决后，可以删除这段诊断代码。 */
+    uint32_t hb_last_count = 0U;
+    uint32_t hb_last_tick  = HAL_GetTick();
+
     while (1)
     {
-        GUI_Menu_Process();
+        /* —— UI刷新由 TIM7 节拍驱动 ——
+         * s_ui_tick_flag 由 TIM7 中断每20ms置1，
+         * 主循环检测到后才执行一次 GUI_Menu_Process()
+         * （内部含 EC11 事件读取 + 必要时的 SPI 绘制）。
+         * EC11 的实时采样完全独立于这个节拍，由 TIM6 单独驱动，
+         * 不受 UI 刷新间隔影响——这就是"两者互不干扰"的核心。 */
+        if (s_ui_tick_flag)
+        {
+            s_ui_tick_flag = 0U;
+            GUI_Menu_Process();
+        }
 
         CAN_Msg_t rx_msg;
         while (BSP_CAN_Receive(CAN_CH_1, &rx_msg)) { (void)rx_msg; }
         while (BSP_CAN_Receive(CAN_CH_2, &rx_msg)) { (void)rx_msg; }
+
+        /* TIM6心跳诊断（1秒一次，频率很低，不影响性能）*/
+        {
+            uint32_t now = HAL_GetTick();
+            if ((now - hb_last_tick) >= 1000U)
+            {
+                uint32_t hb_now   = EC11_GetHeartbeat();
+                uint32_t hb_delta = hb_now - hb_last_count;
+                DEBUG_PRINTF("[DIAG] TIM6 heartbeat delta=%lu in %lums "
+                            "(expect ~500 for 2ms period; low value = ISR starved)\n",
+                            hb_delta, now - hb_last_tick);
+                hb_last_count = hb_now;
+                hb_last_tick  = now;
+            }
+        }
     }
     /* USER CODE END WHILE */
-}
 
-/* ===========================================================
- * SystemClock_Config
- * =========================================================== */
+    /* USER CODE BEGIN 3 */
+  }
+  /* USER CODE END 3 */
+
+/**
+  * @brief System Clock Configuration
+  * @retval None
+  */
 void SystemClock_Config(void)
 {
-    RCC_OscInitTypeDef RCC_OscInitStruct = {0};
-    RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
-    DEBUG_PRINTF("[CLK] SystemClock_Config begin\n");
+  /** Initializes the RCC Oscillators according to the specified parameters
+  * in the RCC_OscInitTypeDef structure.
+  */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  RCC_OscInitStruct.HSEPredivValue = RCC_HSE_PREDIV_DIV1;
+  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.Prediv1Source = RCC_PREDIV1_SOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;
+  RCC_OscInitStruct.PLL2.PLL2State = RCC_PLL_NONE;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
 
-    /* —— 实际硬件使用内部HSI，全部时钟跑8MHz，不依赖外部晶振 —— */
-    DEBUG_PRINTF("[CLK] Using internal HSI, 8MHz, no PLL, no external crystal\n");
+  /** Initializes the CPU, AHB and APB buses clocks
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
-    RCC_OscInitStruct.OscillatorType      = RCC_OSCILLATORTYPE_HSI;
-    RCC_OscInitStruct.HSIState            = RCC_HSI_ON;
-    RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-    RCC_OscInitStruct.PLL.PLLState        = RCC_PLL_NONE;   /* 不使用PLL */
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
 
-    DEBUG_PRINTF("[CLK] Calling HAL_RCC_OscConfig...\n");
-    if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
-    {
-        DEBUG_PRINTF("[CLK] HAL_RCC_OscConfig FAILED!\n");
-        Error_Handler();
-    }
-    DEBUG_PRINTF("[CLK] HAL_RCC_OscConfig OK\n");
-
-    /* HSI(8MHz) 直接作为 SYSCLK，HCLK/PCLK1/PCLK2 全部不分频，均为8MHz
-     * Flash等待周期：8MHz远低于24MHz阈值，FLASH_LATENCY_0即可 */
-    RCC_ClkInitStruct.ClockType      = RCC_CLOCKTYPE_HCLK  | RCC_CLOCKTYPE_SYSCLK
-                                     | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
-    RCC_ClkInitStruct.SYSCLKSource   = RCC_SYSCLKSOURCE_HSI;
-    RCC_ClkInitStruct.AHBCLKDivider  = RCC_SYSCLK_DIV1;   /* HCLK  = 8MHz */
-    RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;     /* PCLK1 = 8MHz */
-    RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;     /* PCLK2 = 8MHz */
-
-    DEBUG_PRINTF("[CLK] Calling HAL_RCC_ClockConfig (HSI direct, 8MHz)...\n");
-    if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
-    {
-        DEBUG_PRINTF("[CLK] HAL_RCC_ClockConfig FAILED!\n");
-        Error_Handler();
-    }
-
-    DEBUG_PRINTF("[CLK] Done. SYSCLK=%lu HCLK=%lu PCLK1=%lu PCLK2=%lu\n",
-                 HAL_RCC_GetSysClockFreq(), HAL_RCC_GetHCLKFreq(),
-                 HAL_RCC_GetPCLK1Freq(), HAL_RCC_GetPCLK2Freq());
+  /** Configure the Systick interrupt time
+  */
+  __HAL_RCC_PLLI2S_ENABLE();
 }
 
 /* USER CODE BEGIN 4 */
+
+/* ===========================================================
+ * 定时器中断回调
+ *
+ * TIM6（2ms周期，建议NVIC优先级设高一些，例如0或1）：
+ *   只调用 EC11_Poll()，内部仅做GPIO读取+状态机判断，
+ *   耗时在微秒级，不会因为屏幕SPI绘制（在主循环里，可能耗时
+ *   数十毫秒）而被延误——两者运行在完全独立的执行上下文，
+ *   物理上互不阻塞，这正是题目要求的"放在两个定时器中相互不干扰"。
+ *
+ * TIM7（20ms周期，优先级可以低于TIM6，例如2或3）：
+ *   只置一个标志位，真正的UI绘制工作仍在主循环里执行
+ *   （SPI传输不适合放在中断上下文里做，HAL_SPI_Transmit
+ *   内部某些等待逻辑、以及传输耗时本身，都不应该阻塞其他中断）。
+ *   这个定时器的作用只是把"该刷新了"这件事从忙等改成事件驱动，
+ *   避免主循环持续空转。
+ * ===========================================================*/
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+    if (htim->Instance == TIM6)
+    {
+        EC11_Poll();   /* 仅此一行，快速返回，不做任何阻塞操作 */
+    }
+    else if (htim->Instance == TIM7)
+    {
+        s_ui_tick_flag = 1U;   /* 仅置标志，真正绘制工作留给主循环 */
+    }
+}
+
 /* USER CODE END 4 */
 
+/**
+  * @brief  This function is executed in case of error occurrence.
+  * @retval None
+  */
 void Error_Handler(void)
 {
-    __disable_irq();
-    while (1) {}
+  /* USER CODE BEGIN Error_Handler_Debug */
+  /* User can add his own implementation to report the HAL error return state */
+  __disable_irq();
+  while (1)
+  {
+  }
+  /* USER CODE END Error_Handler_Debug */
 }
-
 #ifdef USE_FULL_ASSERT
+/**
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  * @param  file: pointer to the source file name
+  * @param  line: assert_param error line source number
+  * @retval None
+  */
 void assert_failed(uint8_t *file, uint32_t line)
 {
-    (void)file;
-    (void)line;
+  /* USER CODE BEGIN 6 */
+  /* User can add his own implementation to report the file name and line number,
+     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+  /* USER CODE END 6 */
 }
-#endif
+#endif /* USE_FULL_ASSERT */

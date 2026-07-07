@@ -51,17 +51,33 @@ static uint32_t s_tx_ok_count[2]   = {0, 0};   /* [0]=CAN1, [1]=CAN2 */
 static uint32_t s_tx_fail_count[2] = {0, 0};
 
 /* ============================================================
- * 波特率参数：基于实际 APB1 时钟动态计算（而非固定写死）
+ * 波特率精确参数查找表
  *
- * 重要：原方案按固定 72MHz/36MHz 写死 Prescaler，
- *       一旦 HCLK 改变（例如 72M→8M），APB1 跟着变化，
- *       Prescaler 不变导致波特率严重偏离设定值，
- *       这正是"调回8M后CAN收发失败"的根本原因。
+ * 修复说明：
+ *   旧方案固定16TQ动态算Prescaler，36MHz下：
+ *   Prescaler=4 → 36M/4/16=562.5Kbps（误差12.5%！）导致ACK Error
  *
- * Baudrate = Fpclk1 / (Prescaler * (1 + BS1 + BS2))
- * 固定 BS1=13TQ, BS2=2TQ, SJW=1TQ（共16TQ/位，业界常用配置）
- * 则：Prescaler = Fpclk1 / (目标波特率 * 16)
+ *   改为预计算精确参数表，误差0%。
+ *   HAL枚举值：CAN_BS1_xTQ=(x-1), CAN_BS2_xTQ=(x-1)
+ *
+ *   36MHz APB1验证（72MHz主频/APB1二分频）：
+ *     500K: PSC=4  BS1=14TQ BS2=3TQ → 36M/4/18=500000bps 采样点83% ✓
+ *     250K: PSC=8  BS1=14TQ BS2=3TQ → 36M/8/18=250000bps 采样点83% ✓
+ *     125K: PSC=16 BS1=14TQ BS2=3TQ → 36M/16/18=125000bps采样点83% ✓
+ *     1M:   PSC=2  BS1=14TQ BS2=3TQ → 36M/2/18=1000000bps采样点83% ✓
+ *   8MHz APB1验证（HSI直通不经PLL）：
+ *     500K: PSC=1  BS1=13TQ BS2=3TQ → 8M/1/17≈470588（用16TQ更好）
+ *     500K: PSC=1  BS1=12TQ BS2=3TQ → 8M/1/16=500000bps 采样点81% ✓
  * ============================================================ */
+typedef struct
+{
+    uint32_t pclk1_hz;
+    uint32_t baud_hz;
+    uint32_t prescaler;
+    uint32_t bs1;       /* HAL枚举值 = 实际TQ数 - 1 */
+    uint32_t bs2;       /* HAL枚举值 = 实际TQ数 - 1 */
+} CAN_TimingEntry_t;
+
 typedef struct
 {
     uint32_t prescaler;
@@ -70,6 +86,21 @@ typedef struct
     uint32_t sjw;
 } CAN_TimingCfg_t;
 
+static const CAN_TimingEntry_t s_timing_lut[] =
+{
+    /* PCLK1       波特率     PSC   BS1(=TQ-1)  BS2(=TQ-1)  */
+    /* 36MHz APB1（72MHz主频，APB1二分频）*/
+    { 36000000U, 1000000U,  2U,  13U,  2U }, /* 36M/2/18=1M,    采样点83.3% */
+    { 36000000U,  500000U,  4U,  13U,  2U }, /* 36M/4/18=500K,  采样点83.3% */
+    { 36000000U,  250000U,  8U,  13U,  2U }, /* 36M/8/18=250K,  采样点83.3% */
+    { 36000000U,  125000U, 16U,  13U,  2U }, /* 36M/16/18=125K, 采样点83.3% */
+    /* 8MHz APB1（HSI直通或低速配置）*/
+    {  8000000U, 1000000U,  1U,   4U,  1U }, /* 8M/1/8=1M,      采样点75%   */
+    {  8000000U,  500000U,  1U,  12U,  2U }, /* 8M/1/16=500K,   采样点81.3% */
+    {  8000000U,  250000U,  2U,  12U,  2U }, /* 8M/2/16=250K,   采样点81.3% */
+    {  8000000U,  125000U,  4U,  12U,  2U }, /* 8M/4/16=125K,   采样点81.3% */
+};
+
 static const uint32_t s_baud_value[] = {
     1000000U,   /* CAN_BAUD_1M   */
     500000U,    /* CAN_BAUD_500K */
@@ -77,46 +108,37 @@ static const uint32_t s_baud_value[] = {
     125000U,    /* CAN_BAUD_125K */
 };
 
-/**
- * @brief  根据实际 APB1 时钟动态计算 CAN 时序参数
- */
 static HAL_StatusTypeDef can_calc_timing(CAN_BaudRate_t baud, CAN_TimingCfg_t *out)
 {
-    uint32_t pclk1   = HAL_RCC_GetPCLK1Freq();   /* 实际 APB1 时钟 */
-    uint32_t target  = s_baud_value[(uint8_t)baud];
-    uint32_t tq_total = 16U;                      /* 1(SyncSeg) + BS1(13) + BS2(2) */
-    uint32_t prescaler;
+    uint32_t pclk1  = HAL_RCC_GetPCLK1Freq();
+    uint32_t target = s_baud_value[(uint8_t)baud];
+    uint32_t i;
 
-    if (pclk1 == 0U || target == 0U) return HAL_ERROR;
-
-    prescaler = pclk1 / (target * tq_total);
-
-    if (prescaler == 0U)
+    for (i = 0U; i < sizeof(s_timing_lut) / sizeof(s_timing_lut[0]); i++)
     {
-        /* APB1 太低，无法用 16TQ 配置凑出目标波特率 */
-        DEBUG_PRINTF("[CAN] ERROR: PCLK1=%lu too low for baud=%lu\n", pclk1, target);
-        return HAL_ERROR;
+        if (s_timing_lut[i].pclk1_hz == pclk1 &&
+            s_timing_lut[i].baud_hz  == target)
+        {
+            out->prescaler = s_timing_lut[i].prescaler;
+            out->bs1       = s_timing_lut[i].bs1;
+            out->bs2       = s_timing_lut[i].bs2;
+            out->sjw       = CAN_SJW_1TQ;
+
+            /* 验证打印（仅显示Prescaler和实际波特率，BS1/BS2用宏值不便反算）*/
+            DEBUG_PRINTF("[CAN] PCLK1=%lu target=%lu presc=%lu "
+                         "BS1_macro=0x%lX BS2_macro=0x%lX -> matched LUT entry[%lu]\n",
+                         pclk1, target, out->prescaler,
+                         out->bs1, out->bs2, i);
+            return HAL_OK;
+        }
     }
 
-    out->prescaler = prescaler;
-    out->bs1       = CAN_BS1_13TQ;
-    out->bs2       = CAN_BS2_2TQ;
-    out->sjw       = CAN_SJW_1TQ;
-
-    {
-        uint32_t actual = pclk1 / (prescaler * tq_total);
-        int32_t  err_pct1000 = (int32_t)(((int64_t)(actual - target) * 100000) / target);
-        DEBUG_PRINTF("[CAN] PCLK1=%lu target=%lu presc=%lu actual=%lu err=%ld.%02ld%%\n",
-                     pclk1, target, prescaler, actual,
-                     err_pct1000 / 1000, (err_pct1000 < 0 ? -err_pct1000 : err_pct1000) % 1000 / 10);
-    }
-
-    return HAL_OK;
+    DEBUG_PRINTF("[CAN] ERROR: 未找到 PCLK1=%lu baud=%lu 的精确参数，"
+                 "请在 s_timing_lut 中添加对应行\n", pclk1, target);
+    return HAL_ERROR;
 }
 
-/* ============================================================
- * 内部：FIFO 写入（中断上下文调用）
- * ============================================================ */
+
 static void fifo_push(CAN_RxFifo_t *fifo, CAN_Msg_t *msg)
 {
     if (fifo->count >= CAN_RX_FIFO_SIZE)
@@ -208,9 +230,17 @@ HAL_StatusTypeDef BSP_CAN_Init(CAN_Channel_t ch,
         return ret;
     }
 
-    /* 停止 CAN，重新配置时序 */
+    /* 停止并反初始化CAN，然后强制状态回到RESET
+     *
+     * 关键修复：HAL_CAN_Init内部在执行真正的初始化（写BTR寄存器）
+     * 之前会检查 phcan->State，只有在 HAL_CAN_STATE_RESET 时才真正
+     * 执行。HAL_CAN_DeInit虽然会清理外设，但在某些版本的HAL里，
+     * DeInit后state可能不是RESET（或者MX_CAN1_Init已经把state设为
+     * READY，导致我们的Init被跳过），必须手动把state强制设回RESET。
+     */
     HAL_CAN_Stop(phcan);
     HAL_CAN_DeInit(phcan);
+    phcan->State = HAL_CAN_STATE_RESET;   /* ← 强制复位状态，让Init真正执行 */
 
     phcan->Instance                  = (ch == CAN_CH_1) ? CAN1 : CAN2;
     phcan->Init.Prescaler            = timing.prescaler;
@@ -219,9 +249,9 @@ HAL_StatusTypeDef BSP_CAN_Init(CAN_Channel_t ch,
     phcan->Init.TimeSeg1             = timing.bs1;
     phcan->Init.TimeSeg2             = timing.bs2;
     phcan->Init.TimeTriggeredMode    = DISABLE;
-    phcan->Init.AutoBusOff           = ENABLE;   /* 总线关闭自动恢复 */
+    phcan->Init.AutoBusOff           = ENABLE;
     phcan->Init.AutoWakeUp           = DISABLE;
-    phcan->Init.AutoRetransmission   = ENABLE;   /* 自动重传 */
+    phcan->Init.AutoRetransmission   = ENABLE;
     phcan->Init.ReceiveFifoLocked    = DISABLE;
     phcan->Init.TransmitFifoPriority = DISABLE;
 
@@ -232,7 +262,76 @@ HAL_StatusTypeDef BSP_CAN_Init(CAN_Channel_t ch,
                      (ch == CAN_CH_1) ? 1 : 2, phcan->ErrorCode);
         return ret;
     }
-    DEBUG_PRINTF("[CAN%d] HAL_CAN_Init OK\n", (ch == CAN_CH_1) ? 1 : 2);
+
+    /* -------------------------------------------------------
+     * 强制直接写BTR寄存器
+     *
+     * 背景：HAL_CAN_Init 在某些状态下会跳过真正的初始化流程，
+     * 导致BTR保持MX_CAN1_Init()设置的默认值（BRP=15，750Kbps），
+     * 而不是我们需要的参数。
+     *
+     * 修复：不依赖HAL状态机，直接操控寄存器：
+     *   1. 进入初始化模式（INRQ=1，只有此模式下BTR可写）
+     *   2. 写入正确的BTR值
+     *   3. 退出初始化模式回到正常模式（INRQ=0）
+     *
+     * BTR寄存器布局：
+     *   bit[9:0]   BRP = Prescaler-1
+     *   bit[19:16] TS1 = BS1_TQ-1
+     *   bit[22:20] TS2 = BS2_TQ-1
+     *   bit[25:24] SJW = SJW_TQ-1
+     * ------------------------------------------------------- */
+    {
+        uint32_t btr_val;
+        uint32_t brp = timing.prescaler - 1U;
+        uint32_t ts1 = timing.bs1;   /* HAL枚举值 = TQ-1，直接就是寄存器值 */
+        uint32_t ts2 = timing.bs2;
+        uint32_t sjw = 0U;           /* SJW=1TQ，寄存器值=0 */
+
+        btr_val = (brp & 0x3FFU)
+                | ((ts1 & 0xFU)  << 16U)
+                | ((ts2 & 0x7U)  << 20U)
+                | ((sjw & 0x3U)  << 24U);
+
+        /* 请求进入初始化模式 */
+        phcan->Instance->MCR |= CAN_MCR_INRQ;
+        uint32_t timeout = HAL_GetTick();
+        while (!(phcan->Instance->MSR & CAN_MSR_INAK))
+        {
+            if ((HAL_GetTick() - timeout) > 10U)
+            {
+                DEBUG_PRINTF("[CAN%d] INRQ timeout!\n", (ch == CAN_CH_1) ? 1 : 2);
+                return HAL_TIMEOUT;
+            }
+        }
+
+        /* 写BTR */
+        phcan->Instance->BTR = btr_val;
+
+        /* 退出初始化模式 */
+        phcan->Instance->MCR &= ~CAN_MCR_INRQ;
+        timeout = HAL_GetTick();
+        while (phcan->Instance->MSR & CAN_MSR_INAK)
+        {
+            if ((HAL_GetTick() - timeout) > 10U)
+            {
+                DEBUG_PRINTF("[CAN%d] exit INRQ timeout!\n", (ch == CAN_CH_1) ? 1 : 2);
+                return HAL_TIMEOUT;
+            }
+        }
+
+        /* 验证写入结果 */
+        uint32_t btr_read = phcan->Instance->BTR;
+        uint32_t actual_brp = (btr_read & 0x3FFU) + 1U;
+        uint32_t actual_ts1 = ((btr_read >> 16U) & 0xFU) + 1U;
+        uint32_t actual_ts2 = ((btr_read >> 20U) & 0x7U) + 1U;
+        uint32_t actual_baud = HAL_RCC_GetPCLK1Freq() /
+                               (actual_brp * (1U + actual_ts1 + actual_ts2));
+        DEBUG_PRINTF("[CAN%d] BTR=0x%08lX BRP=%lu TS1=%lu TS2=%lu "
+                     "-> 实际波特率=%lu bps (期望500000)\n",
+                     (ch == CAN_CH_1) ? 1 : 2,
+                     btr_read, actual_brp, actual_ts1, actual_ts2, actual_baud);
+    }
 
     /* 配置接收全部过滤器 */
     ret = can_filter_accept_all(ch);
@@ -254,12 +353,14 @@ HAL_StatusTypeDef BSP_CAN_Init(CAN_Channel_t ch,
         memset(&g_can2_rx_fifo, 0, sizeof(g_can2_rx_fifo));
     }
 
-    /* 使能 FIFO0 接收中断 + 错误中断（用于调试总线错误）*/
+    /* 使能 FIFO0 接收中断 + 真正的错误中断
+     * 注意：不激活 CAN_IT_LAST_ERROR_CODE，该中断在每一帧收发后
+     * 只要LEC字段有变化就会触发，并非只在出错时触发，高频激活
+     * 会导致 HAL_CAN_ErrorCallback 被每帧调用一次，干扰正常收发。*/
     ret = HAL_CAN_ActivateNotification(phcan, CAN_IT_RX_FIFO0_MSG_PENDING
                                               | CAN_IT_ERROR_WARNING
                                               | CAN_IT_ERROR_PASSIVE
                                               | CAN_IT_BUSOFF
-                                              | CAN_IT_LAST_ERROR_CODE
                                               | CAN_IT_ERROR);
     if (ret != HAL_OK)
     {
@@ -567,12 +668,14 @@ void HAL_CAN_ErrorCallback(CAN_HandleTypeDef *hcan)
     uint32_t err    = HAL_CAN_GetError(hcan);
     uint32_t now    = HAL_GetTick();
 
-    /* 即使跳过打印，错误状态仍需清除，否则同一错误会反复触发中断 */
+    /* 限流：同一通道最多每500ms打印一次 */
     if ((now - s_last_err_print_tick[ch_idx]) < 500U)
-    {
-        HAL_CAN_ResetError(hcan);
         return;
-    }
+
+    /* 只在真正有非零错误时才打印，过滤掉 HAL_CAN_ERROR_NONE */
+    if (err == HAL_CAN_ERROR_NONE)
+        return;
+
     s_last_err_print_tick[ch_idx] = now;
 
     DEBUG_PRINTF("[CAN%d] ErrorCallback ErrorCode=0x%08lX ESR=0x%08lX\n",
@@ -585,18 +688,15 @@ void HAL_CAN_ErrorCallback(CAN_HandleTypeDef *hcan)
     if (err & HAL_CAN_ERROR_EPV)
         DEBUG_PRINTF("[CAN%d] -> Error Passive\n", ch_num);
     if (err & HAL_CAN_ERROR_STF)
-        DEBUG_PRINTF("[CAN%d] -> Stuff Error (波特率不匹配的典型症状)\n", ch_num);
+        DEBUG_PRINTF("[CAN%d] -> Stuff Error\n", ch_num);
     if (err & HAL_CAN_ERROR_FOR)
-        DEBUG_PRINTF("[CAN%d] -> Form Error (波特率不匹配的典型症状)\n", ch_num);
+        DEBUG_PRINTF("[CAN%d] -> Form Error\n", ch_num);
     if (err & HAL_CAN_ERROR_ACK)
-        DEBUG_PRINTF("[CAN%d] -> ACK Error (总线上没有其他设备应答)\n", ch_num);
+        DEBUG_PRINTF("[CAN%d] -> ACK Error (总线上无节点应答)\n", ch_num);
     if (err & HAL_CAN_ERROR_BR)
         DEBUG_PRINTF("[CAN%d] -> Bit Recessive Error\n", ch_num);
     if (err & HAL_CAN_ERROR_BD)
         DEBUG_PRINTF("[CAN%d] -> Bit Dominant Error\n", ch_num);
     if (err & HAL_CAN_ERROR_CRC)
         DEBUG_PRINTF("[CAN%d] -> CRC Error\n", ch_num);
-
-    HAL_CAN_ResetError(hcan);
 }
-

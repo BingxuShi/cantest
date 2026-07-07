@@ -33,22 +33,37 @@ EC11_Handle_t hec11 = {0};
  * 使用经典 4步/格 模式，完整一格需累计 ±4 步才输出事件
  * ============================================================ */
 
-/* 状态转移 + 步进编码：高nibble=delta(0=无,1=CW,2=CCW)，低nibble=新状态 */
-static const uint8_t QSM_TABLE[16] = {
-/*  AB=00   AB=01   AB=10   AB=11  （当前状态在行）*/
-    0x00,   0x20,   0x10,   0x00,  /* 状态0（AB=00）*/
-    0x10,   0x00,   0x00,   0x20,  /* 状态1（AB=01）*/
-    0x20,   0x00,   0x00,   0x10,  /* 状态2（AB=10）*/
-    0x00,   0x10,   0x20,   0x00,  /* 状态3（AB=11）*/
-};
+/* ============================================================
+ * 正交状态机 —— 卡点输出版（Detent-based，适配各种EC11规格）
+ *
+ * 核心思路：
+ *   EC11 在每个物理卡点（手感上的"格"）处，A/B两相都处于同一个
+ *   稳定电平（通常 AB=11，少数型号是 AB=00）。
+ *   机械抖动只发生在旋转过程中（A/B不一致的过渡区），
+ *   而卡点本身是稳定的。
+ *
+ *   因此，只需要：
+ *     1. 记录"上一次离开稳定卡点"时的方向（CW 还是 CCW 出发）
+ *     2. 当 A/B 重新回到稳定卡点时，输出一次事件
+ *
+ *   这样，无论 EC11 是每格1/2/4个脉冲，每次物理旋转一格都只会
+ *   输出一次事件；旋转到中间位置时因为没有到达新卡点，不会输出
+ *   任何事件——"中间位置选框一直移动"的问题从根本上消失。
+ *
+ * 稳定卡点电平（由 EC11_DETENT_STATE 宏定义，可修改适配不同型号）：
+ *   大多数 EC11：卡点处 AB=11（两相均为高电平，上拉状态）
+ *   少数型号   ：卡点处 AB=00（两相均为低电平）
+ *   如果旋转无响应或方向相反，尝试把宏改为另一个值。
+ * ============================================================ */
 
-/* 步进累加器，满±4输出一次事件 */
-static int8_t s_step_acc = 0;
+/* 卡点时 AB 的电平组合（AB = A<<1 | B）
+ * 大多数 EC11 卡点处两相均为高电平，上拉到VCC → AB=0b11=3 */
+#define EC11_DETENT_STATE   3U
 
-/* 心跳计数：每次EC11_Poll调用都自增一次，用于诊断TIM6实际触发频率。
- * 例如在主循环里每1000ms读取一次差值，理论上应该约等于500（2ms周期）。
- * 如果实测值远小于500，说明TIM6中断被其他更高优先级中断/某种
- * 阻塞操作严重拖慢了实际触发频率。 */
+/* 步进方向：记录"上一次从卡点出发时走的方向"*/
+static int8_t s_last_dir = 0;   /* +1=CW方向出发, -1=CCW方向出发, 0=未知/初始 */
+
+/* 心跳计数：每次EC11_Poll调用都自增一次，用于诊断TIM6实际触发频率。*/
 static volatile uint32_t s_poll_heartbeat = 0U;
 
 /* ============================================================
@@ -59,68 +74,74 @@ void EC11_Init(void)
     uint8_t a = (HAL_GPIO_ReadPin(EC11_A_PORT, EC11_A_PIN) == GPIO_PIN_SET) ? 1U : 0U;
     uint8_t b = (HAL_GPIO_ReadPin(EC11_B_PORT, EC11_B_PIN) == GPIO_PIN_SET) ? 1U : 0U;
 
-    /* 根据当前电平推算初始状态，避免上电时误触发 */
     hec11.qsm_state = (uint8_t)((a << 1U) | b);
 
     hec11.count         = 0;
     hec11.events        = EC11_EVT_NONE;
-    hec11.key_last      = 1U;  /* 初始高电平（上拉，未按下）*/
+    hec11.key_last      = 1U;
     hec11.key_stable    = 1U;
     hec11.key_pressed   = 0U;
     hec11.long_fired    = 0U;
     hec11.key_down_tick = 0U;
     hec11.key_change_tick = 0U;
-    s_step_acc          = 0;
+
+    s_last_dir = 0;
 }
 
 /* ============================================================
- * EC11_Poll  —  在 while(1) 中持续调用
+ * EC11_Poll  —  由 TIM6 中断（2ms周期）调用，不在主循环调用
  * ============================================================ */
 void EC11_Poll(void)
 {
     uint32_t now = HAL_GetTick();
 
     /* ----------------------------------------------------------
-     * 旋转解码：正交状态机
+     * 旋转解码：卡点输出状态机
      * ---------------------------------------------------------- */
     {
-        uint8_t a     = (HAL_GPIO_ReadPin(EC11_A_PORT, EC11_A_PIN) == GPIO_PIN_SET) ? 1U : 0U;
-        uint8_t b     = (HAL_GPIO_ReadPin(EC11_B_PORT, EC11_B_PIN) == GPIO_PIN_SET) ? 1U : 0U;
-        uint8_t ab    = (uint8_t)((a << 1U) | b);
-        uint8_t entry = QSM_TABLE[(hec11.qsm_state << 2U) | ab];
-        uint8_t delta = (entry >> 4U);
+        uint8_t a  = (HAL_GPIO_ReadPin(EC11_A_PORT, EC11_A_PIN) == GPIO_PIN_SET) ? 1U : 0U;
+        uint8_t b  = (HAL_GPIO_ReadPin(EC11_B_PORT, EC11_B_PIN) == GPIO_PIN_SET) ? 1U : 0U;
+        uint8_t ab = (uint8_t)((a << 1U) | b);
+        uint8_t prev_state = hec11.qsm_state;
 
-        hec11.qsm_state = entry & 0x0FU;
+        hec11.qsm_state = ab;   /* 直接记录当前 AB 状态，用于检测变化 */
 
-        if (delta == 1U)        /* CW 步进 */
+        if (ab == prev_state)
         {
-            s_step_acc++;
-            if (s_step_acc >= 4)
+            /* 状态未变化，无需处理 */
+        }
+        else if (ab == EC11_DETENT_STATE)
+        {
+            /* ——回到稳定卡点—— 根据记录的方向输出一次事件 */
+            if (s_last_dir > 0)
             {
-                s_step_acc = 0;
                 hec11.count++;
                 hec11.events |= EC11_EVT_CW;
-                /* 注意：此处刻意不打印 DEBUG_PRINTF！
-                 * EC11_Poll 现在运行在 TIM6 中断（2ms周期）中，
-                 * RTT printf 涉及字符串格式化+缓冲区写入，在中断
-                 * 上下文里频繁调用会显著拖慢本次中断的执行时间，
-                 * 导致下一次 TIM6 中断被推迟，表现为"旋转大部分
-                 * 时间没反应"——这正是本次问题的根因。
-                 * 如需调试，使用下方的 s_poll_heartbeat 计数器，
-                 * 在主循环里低频读取打印，不占用中断时间。 */
             }
-        }
-        else if (delta == 2U)   /* CCW 步进 */
-        {
-            s_step_acc--;
-            if (s_step_acc <= -4)
+            else if (s_last_dir < 0)
             {
-                s_step_acc = 0;
                 hec11.count--;
                 hec11.events |= EC11_EVT_CCW;
-                /* 同上，不在中断里打印 */
             }
+            /* s_last_dir == 0：上电后首次到达卡点，不输出事件 */
+            s_last_dir = 0;   /* 重置，等待下一次从卡点出发 */
         }
+        else if (prev_state == EC11_DETENT_STATE)
+        {
+            /* ——从稳定卡点出发—— 判断首步方向 */
+            /* 大多数 EC11 从 AB=11 出发：
+             *   CW  方向首步：A 先变低 → AB=01
+             *   CCW 方向首步：B 先变低 → AB=10
+             * 若你的 EC11 方向与实际相反，把下面两行 CW/CCW 互换 */
+            if (ab == 0x02U)          /* AB=01：A低B高，CW方向出发 */
+                s_last_dir = +1;
+            else if (ab == 0x01U)     /* AB=10：A高B低，CCW方向出发 */
+                s_last_dir = -1;
+            else
+                s_last_dir = 0;       /* 不应该出现的状态，重置 */
+        }
+        /* 其他过渡态（AB=00/01/10之间互相跳变）：
+         * 只是旋转过程中的中间状态，不更新方向，也不输出事件 */
     }
 
     /* ----------------------------------------------------------
@@ -228,7 +249,7 @@ void EC11_ResetCount(void)
 
     __disable_irq();
     hec11.count = 0;
-    s_step_acc  = 0;
+    s_last_dir  = 0;
     if (!primask) __enable_irq();
 }
 
